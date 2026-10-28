@@ -167,7 +167,10 @@ void updateKeypad(uint32_t now) {
   analogRead(adc_pin); // Discard after switching from A1.
   char key = voltageToKey(analogRead(adc_pin) * (5.0 / 1023.0));
   if (key != '\0') {
-    if (shouldSleep(now)) Serial.println(F("Awake"));
+    if (shouldSleep(now)) {
+      Serial.println(F("Awake"));
+      digitalWrite(4, HIGH);
+    }
     last_activity = now;
   }
 
@@ -216,11 +219,11 @@ void setup() {
     if (digit < '0' || digit > '9') break;
     saved_password += char(digit);
   }
-
+  pinMode(4, OUTPUT);
   pinMode(adc_pin, INPUT);
   pinMode(current_pin, INPUT);
   pinMode(9, OUTPUT);
-
+  digitalWrite(4, HIGH);
   // clear Timer1 control registers
   TCCR1A = 0;
   TCCR1B = 0;
@@ -241,5 +244,8 @@ void loop() {
   if (state == LOCKED || state == UNLOCKED || state == CHANGING_PASSWORD) {
     updateKeypad(now);
   }
-  if (shouldSleep(now)) powerDown();
+  if (shouldSleep(now)) {
+    digitalWrite(4, LOW);
+    powerDown();
+  }
 }
