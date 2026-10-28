@@ -2,15 +2,14 @@
 
 const int adc_pin = A0;
 const int current_pin = A1;
-const int unlock_trip = 3 * 6;
-const int lock_trip = 3 * 5;
+const int unlock_trip = 32;
+const int lock_trip = 40;
 
 // state variables
 enum State {
-  STARTING, LOCKING, UNLOCKING, RETURNING_LOCKED, RETURNING_UNLOCKED,
-  LOCKED, UNLOCKED, CHANGING_PASSWORD, FAULT
+  LOCKING, UNLOCKING, LOCKED, UNLOCKED, CHANGING_PASSWORD
 };
-State state = STARTING;
+State state = LOCKING;
 String valid_password = "1234";
 String entered_password = "";
 
@@ -19,15 +18,36 @@ enum KeyState { WAIT_FOR_RELEASE, READY, PRESSED };
 KeyState key_state = WAIT_FOR_RELEASE;
 char pressed_key = '\0';
 uint32_t key_started = 0;
-uint32_t last_keypad = 0;
 
 // timing vars
 uint32_t move_started = 0;
-uint32_t last_sample = 0;
-unsigned int current_sum = 0;
-byte current_samples = 0;
-byte high_windows = 0;
-uint32_t last_log = 0;
+uint32_t last_poll = 0;
+byte spike_count = 0;
+uint32_t last_activity = 0;
+
+ISR(WDT_vect) {} // The watchdog only wakes the CPU; it does not reset it.
+
+bool shouldSleep(uint32_t now) {
+  return (state == LOCKED || state == UNLOCKED) && key_state == READY &&
+         entered_password == "" && (uint32_t)(now - last_activity) >= 30000;
+}
+
+void powerDown() {
+  ADCSRA &= ~_BV(ADEN);
+  noInterrupts();
+  __asm__ __volatile__("wdr" ::: "memory");
+  MCUSR &= ~_BV(WDRF);
+  WDTCSR = _BV(WDCE) | _BV(WDE);
+  WDTCSR = _BV(WDIF) | _BV(WDIE) | _BV(WDP0); // Approximately 32 ms.
+  SMCR = _BV(SM1) | _BV(SE);
+  // Keep interrupt enable and sleep adjacent so a wakeup cannot be missed.
+  __asm__ __volatile__("sei\n\tsleep\n\tcli" ::: "memory");
+  SMCR = 0;
+  WDTCSR = _BV(WDCE) | _BV(WDE);
+  WDTCSR = 0;
+  ADCSRA |= _BV(ADEN);
+  interrupts();
+}
 
 char voltageToKey(float voltage) {
   if (voltage > 3.8500 || voltage < 2.1500) {
@@ -48,77 +68,57 @@ char voltageToKey(float voltage) {
 }
 
 bool motorMoving() {
-  return state == STARTING || state == LOCKING || state == UNLOCKING ||
-         state == RETURNING_LOCKED || state == RETURNING_UNLOCKED;
+  return state == LOCKING || state == UNLOCKING;
 }
 
 void startMove(State destination) {
   state = destination;
-  move_started = last_sample = millis();
-  current_sum = current_samples = high_windows = 0;
+  move_started = last_poll = millis();
+  spike_count = 0;
   entered_password = "";
   key_state = WAIT_FOR_RELEASE;
 
-  bool locking = state == STARTING || state == LOCKING || state == RETURNING_LOCKED;
+  bool locking = state == LOCKING;
   OCR1A = locking ? 1000 : 2000;
-  if (state == RETURNING_LOCKED || state == RETURNING_UNLOCKED) {
-    Serial.println(F("Blocked: returning to previous position"));
-  } else {
-    Serial.println(locking ? F("Locking") : F("Unlocking"));
-  }
+  TCCR1A |= _BV(COM1A1);
+  TCCR1B |= _BV(CS11);
+  Serial.println(locking ? F("Locking") : F("Unlocking"));
 }
 
-void motorFault() {
-  TCCR1A &= ~_BV(COM1A1);
-  digitalWrite(9, LOW);
-  state = FAULT;
-  Serial.println(F("Motor fault. Clear obstruction and reset Arduino."));
-}
-
-void reverseOrStop() {
-  if (state == UNLOCKING) startMove(RETURNING_LOCKED);
-  else if (state == LOCKING) startMove(RETURNING_UNLOCKED);
-  else motorFault();
+void reverseMotor() {
+  Serial.println(F("Blocked: returning to previous position"));
+  startMove(state == UNLOCKING ? LOCKING : UNLOCKING);
 }
 
 void updateMotor(uint32_t now) {
   if (!motorMoving()) return;
-  uint32_t sample_elapsed = now - last_sample;
-  if (sample_elapsed > 10) {
-    motorFault();
-    return;
-  }
+  uint32_t sample_elapsed = now - last_poll;
   uint32_t elapsed = now - move_started;
   if (elapsed >= 450) {
-    reverseOrStop();
+    reverseMotor();
     return;
   }
-  if (sample_elapsed < 1) return;
-  last_sample = now;
+  if (sample_elapsed < 20) return;
+  last_poll = now;
 
   analogRead(current_pin);
-  current_sum += analogRead(current_pin);
-  if (++current_samples < 20) return;
-  int current_average = (current_sum + 10) / 20;
-  current_sum = current_samples = 0;
+  int current = analogRead(current_pin);
 
-  bool locking = state == STARTING || state == LOCKING || state == RETURNING_LOCKED;
+  bool locking = state == LOCKING;
   int threshold = locking ? lock_trip : unlock_trip;
-  if (elapsed > 100 && current_average >= threshold) high_windows++;
-  else high_windows = 0;
+  if (elapsed > (locking ? 250 : 200) && current >= threshold) spike_count++;
+  else spike_count = 0;
 
-  if (high_windows >= 3) {
-    reverseOrStop();
-  } else if (elapsed >= 400 && high_windows == 0) {
+  if (spike_count >= 3) {
+    reverseMotor();
+  } else if (elapsed >= 400 && spike_count == 0) {
+    while (PINB & _BV(PB1)) {} // Finish the D9 pulse before stopping Timer1.
+    TCCR1A &= ~_BV(COM1A1);
+    TCCR1B &= ~_BV(CS11);
+    digitalWrite(9, LOW);
     state = locking ? LOCKED : UNLOCKED;
+    last_activity = now;
     Serial.println(locking ? F("Locked") : F("Unlocked"));
-  }
-
-  if (motorMoving() && (uint32_t)(now - last_log) >= 100 &&
-      Serial.availableForWrite() >= 32) {
-    last_log = now;
-    Serial.print(F("Current ADC: "));
-    Serial.println(current_average);
   }
 }
 
@@ -158,10 +158,18 @@ void handleKey(char key) {
 }
 
 void updateKeypad(uint32_t now) {
-  if ((uint32_t)(now - last_keypad) < 20) return;
-  last_keypad = now;
+  if (!shouldSleep(now) && (uint32_t)(now - last_poll) < 20) return;
+  if (shouldSleep(now) && (uint32_t)(last_poll - last_activity) < 30000) {
+    Serial.println(F("Power down"));
+    Serial.flush();
+  }
+  last_poll = now;
   analogRead(adc_pin); // Discard after switching from A1.
   char key = voltageToKey(analogRead(adc_pin) * (5.0 / 1023.0));
+  if (key != '\0') {
+    if (shouldSleep(now)) Serial.println(F("Awake"));
+    last_activity = now;
+  }
 
   switch (key_state) {
     case WAIT_FOR_RELEASE:
@@ -224,14 +232,14 @@ void setup() {
   // Timer1 sends PWM on pin 9
   TCCR1A = _BV(COM1A1);
   TCCR1B = _BV(WGM13) | _BV(CS11);
-  startMove(STARTING);
+  startMove(LOCKING);
 }
 
 void loop() {
   uint32_t now = millis();
-  if (Serial.available() && Serial.read() == 'S') motorFault();
   updateMotor(now);
   if (state == LOCKED || state == UNLOCKED || state == CHANGING_PASSWORD) {
     updateKeypad(now);
   }
+  if (shouldSleep(now)) powerDown();
 }
