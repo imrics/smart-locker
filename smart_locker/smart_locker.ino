@@ -1,4 +1,5 @@
 #include "EEPROM_lib.h"
+#include "Indicators.h"
 
 const int adc_pin = A0;
 const int current_pin = A1;
@@ -6,9 +7,6 @@ const int unlock_trip = 32;
 const int lock_trip = 40;
 
 // state variables
-enum State {
-  LOCKING, UNLOCKING, LOCKED, UNLOCKED, CHANGING_PASSWORD
-};
 State state = LOCKING;
 String valid_password = "1234";
 String entered_password = "";
@@ -27,9 +25,14 @@ uint32_t last_activity = 0;
 
 ISR(WDT_vect) {} // The watchdog only wakes the CPU; it does not reset it.
 
-bool shouldSleep(uint32_t now) {
+bool isIdle(uint32_t now) {
   return (state == LOCKED || state == UNLOCKED) && key_state == READY &&
-         entered_password == "" && (uint32_t)(now - last_activity) >= 30000;
+         entered_password == "" &&
+         (uint32_t)(now - last_activity) >= 30000;
+}
+
+bool shouldSleep(uint32_t now) {
+  return isIdle(now) && !feedbackActive();
 }
 
 void powerDown() {
@@ -127,20 +130,24 @@ void handleKey(char key) {
     if (key == '*') {
       entered_password = "";
       state = UNLOCKED;
+      showFeedback(UI_CANCEL);
       Serial.println("Password change canceled");
     } else if (key == '#') {
       if (entered_password != "") {
         if (EEPROM_update_array((uint8_t *)entered_password.c_str(),
                                 entered_password.length() + 1, 0) != EEPROM_SUCCESSFUL) {
           Serial.println("Password save failed");
+          showFeedback(UI_ERROR);
         } else {
           valid_password = entered_password;
           entered_password = "";
           state = UNLOCKED;
+          showFeedback(UI_SUCCESS);
           Serial.println("Password changed");
         }
       } else {
         Serial.println("Enter a password first");
+        showFeedback(UI_ERROR);
       }
     } else {
       entered_password += key;
@@ -150,7 +157,10 @@ void handleKey(char key) {
     if (state == UNLOCKED) startMove(LOCKING);
   } else if (state == LOCKED && key == '#') {
     if (entered_password == valid_password) startMove(UNLOCKING);
-    else Serial.println("Incorrect password");
+    else {
+      Serial.println("Incorrect password");
+      showFeedback(UI_ERROR);
+    }
     entered_password = "";
   } else if (state == LOCKED) {
     entered_password += key;
@@ -195,6 +205,7 @@ void updateKeypad(uint32_t now) {
         state = CHANGING_PASSWORD;
         entered_password = "";
         key_state = WAIT_FOR_RELEASE;
+        showFeedback(UI_NOTICE);
         Serial.println("Enter new password, then press #");
       }
       break;
@@ -220,6 +231,7 @@ void setup() {
     saved_password += char(digit);
   }
   pinMode(4, OUTPUT);
+  setupIndicators();
   pinMode(adc_pin, INPUT);
   pinMode(current_pin, INPUT);
   pinMode(9, OUTPUT);
@@ -240,10 +252,14 @@ void setup() {
 
 void loop() {
   uint32_t now = millis();
+  State previous_motor_state = state;
   updateMotor(now);
+  updateMotorFeedback(previous_motor_state, state);
   if (state == LOCKED || state == UNLOCKED || state == CHANGING_PASSWORD) {
     updateKeypad(now);
   }
+  uint32_t indicator_now = millis(); // Use fresh time after EEPROM/Serial work.
+  updateIndicators(indicator_now, state, isIdle(indicator_now));
   if (shouldSleep(now)) {
     digitalWrite(4, LOW);
     powerDown();
