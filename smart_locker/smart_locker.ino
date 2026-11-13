@@ -19,7 +19,7 @@ State state = LOCKING;
 String valid_password = "1234";
 String entered_password = "";
 
-enum Feedback { UI_NONE, UI_SUCCESS, UI_ERROR, UI_NOTICE, UI_CANCEL };
+enum Feedback { UI_NONE, UI_SUCCESS, UI_ERROR, UI_NOTICE, UI_CANCEL, UI_LOW_BATTERY };
 Feedback feedback = UI_NONE;
 uint32_t feedback_started = 0;
 uint16_t buzzer_hz = 0;
@@ -60,7 +60,7 @@ void setBuzzer(uint16_t hz) {
   if (hz == 0) return;
 
   // CTC, toggle OC2B at TOP; f = 16 MHz / (2 * 32 * (OCR2A + 1)).
-  // Only 1000 Hz and 2000 Hz are used, giving TOP = 249 and 124.
+  // 1000, 1250 and 2000 Hz give TOP = 249, 199 and 124.
   TCNT2 = 0;
   OCR2A = OCR2B = F_CPU / (64UL * hz) - 1;
   TIFR2 = _BV(OCF2A) | _BV(OCF2B) | _BV(TOV2);
@@ -69,8 +69,9 @@ void setBuzzer(uint16_t hz) {
 }
 
 void updateIndicators(uint32_t now) {
+  pauseBatteryWarning(now);
   uint32_t elapsed = now - feedback_started;
-  uint16_t duration = feedback == UI_ERROR ? 400 :
+  uint16_t duration = feedback == UI_LOW_BATTERY ? 1000 : feedback == UI_ERROR ? 400 :
                       feedback == UI_SUCCESS ? 150 : 100;
   if (feedback != UI_NONE && elapsed >= duration) feedback = UI_NONE;
 
@@ -82,7 +83,9 @@ void updateIndicators(uint32_t now) {
                (state == LOCKING || state == UNLOCKING || state == CHANGING_PASSWORD));
   uint16_t hz = 0;
 
-  if (feedback == UI_SUCCESS) {
+  if (feedback == UI_LOW_BATTERY) {
+    hz = 1250; // One steady one-second tone: replace the battery.
+  } else if (feedback == UI_SUCCESS) {
     hz = 2000; // One 150 ms high tone: unlocked or password saved.
   } else if (feedback == UI_ERROR) {
     hz = 1000; // One 400 ms low tone: rejection, save error or blockage.
@@ -238,6 +241,7 @@ void updateKeypad(uint32_t now) {
     if (shouldSleep(now)) {
       Serial.println(F("Awake"));
       digitalWrite(4, HIGH);
+      wakeBattery(now);
     }
     last_activity = now;
   }
@@ -297,6 +301,7 @@ void setup() {
   digitalWrite(buzzer_pin, LOW);
   pinMode(adc_pin, INPUT);
   pinMode(current_pin, INPUT);
+  setupBattery();
   pinMode(9, OUTPUT);
   digitalWrite(4, HIGH);
   // clear Timer1 control registers
@@ -330,7 +335,9 @@ void loop() {
   if (state == LOCKED || state == UNLOCKED || state == CHANGING_PASSWORD) {
     updateKeypad(now);
   }
-  updateIndicators(millis()); // Use fresh time after EEPROM/Serial work.
+  updateBattery(millis());
+  now = millis(); // Battery/EEPROM/Serial work may cross the idle-sleep deadline.
+  updateIndicators(now);
   if (shouldSleep(now)) {
     digitalWrite(4, LOW);
     powerDown();
