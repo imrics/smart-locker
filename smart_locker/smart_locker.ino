@@ -1,29 +1,15 @@
 #include "EEPROM_lib.h"
+#include "Indicators.h"
 
 const int adc_pin = A0;
 const int current_pin = A1;
 const int unlock_trip = 32;
 const int lock_trip = 40;
 
-// Milestone 4b: three steady status LEDs and one tone per event.
-const byte red_led = 5;
-const byte green_led = 6;
-const byte yellow_led = 7;
-const byte buzzer_pin = 3; // PD3 / OC2B: Timer2, separate from the D9 servo.
-
 // state variables
-enum State {
-  LOCKING, UNLOCKING, LOCKED, UNLOCKED, CHANGING_PASSWORD
-};
 State state = LOCKING;
 String valid_password = "1234";
 String entered_password = "";
-
-enum Feedback { UI_NONE, UI_SUCCESS, UI_ERROR, UI_NOTICE, UI_CANCEL, UI_LOW_BATTERY };
-Feedback feedback = UI_NONE;
-uint32_t feedback_started = 0;
-uint16_t buzzer_hz = 0;
-bool ui_blockage = false; // Display history only; never controls the motor.
 
 // keypad state variables
 enum KeyState { WAIT_FOR_RELEASE, READY, PRESSED };
@@ -39,61 +25,14 @@ uint32_t last_activity = 0;
 
 ISR(WDT_vect) {} // The watchdog only wakes the CPU; it does not reset it.
 
-bool shouldSleep(uint32_t now) {
+bool isIdle(uint32_t now) {
   return (state == LOCKED || state == UNLOCKED) && key_state == READY &&
-         entered_password == "" && feedback == UI_NONE &&
+         entered_password == "" &&
          (uint32_t)(now - last_activity) >= 30000;
 }
 
-// Milestone 4b: these helpers schedule indications without delay() or a library.
-void showFeedback(Feedback next) {
-  feedback = next;
-  feedback_started = millis();
-}
-
-void setBuzzer(uint16_t hz) {
-  if (hz == buzzer_hz) return;
-  TCCR2B = 0;
-  TCCR2A = 0;
-  digitalWrite(buzzer_pin, LOW);
-  buzzer_hz = hz;
-  if (hz == 0) return;
-
-  // CTC, toggle OC2B at TOP; f = 16 MHz / (2 * 32 * (OCR2A + 1)).
-  // 1000, 1250 and 2000 Hz give TOP = 249, 199 and 124.
-  TCNT2 = 0;
-  OCR2A = OCR2B = F_CPU / (64UL * hz) - 1;
-  TIFR2 = _BV(OCF2A) | _BV(OCF2B) | _BV(TOV2);
-  TCCR2A = _BV(WGM21) | _BV(COM2B0);
-  TCCR2B = _BV(CS21) | _BV(CS20); // Timer2 prescaler 32; no ISR needed.
-}
-
-void updateIndicators(uint32_t now) {
-  pauseBatteryWarning(now);
-  uint32_t elapsed = now - feedback_started;
-  uint16_t duration = feedback == UI_LOW_BATTERY ? 1000 : feedback == UI_ERROR ? 400 :
-                      feedback == UI_SUCCESS ? 150 : 100;
-  if (feedback != UI_NONE && elapsed >= duration) feedback = UI_NONE;
-
-  // LEDs follow only the state. Keypresses and buzzer feedback never change them.
-  bool awake = !shouldSleep(now);
-  digitalWrite(red_led, awake && state == LOCKED);
-  digitalWrite(green_led, awake && state == UNLOCKED);
-  digitalWrite(yellow_led, awake &&
-               (state == LOCKING || state == UNLOCKING || state == CHANGING_PASSWORD));
-  uint16_t hz = 0;
-
-  if (feedback == UI_LOW_BATTERY) {
-    hz = 1250; // One steady one-second tone: replace the battery.
-  } else if (feedback == UI_SUCCESS) {
-    hz = 2000; // One 150 ms high tone: unlocked or password saved.
-  } else if (feedback == UI_ERROR) {
-    hz = 1000; // One 400 ms low tone: rejection, save error or blockage.
-  } else if (feedback == UI_NOTICE || feedback == UI_CANCEL) {
-    hz = feedback == UI_NOTICE ? 2000 : 1000;
-  }
-
-  setBuzzer(awake ? hz : 0);
+bool shouldSleep(uint32_t now) {
+  return isIdle(now) && !feedbackActive();
 }
 
 void powerDown() {
@@ -240,8 +179,8 @@ void updateKeypad(uint32_t now) {
   if (key != '\0') {
     if (shouldSleep(now)) {
       Serial.println(F("Awake"));
+      wakeBattery();
       digitalWrite(4, HIGH);
-      wakeBattery(now);
     }
     last_activity = now;
   }
@@ -293,12 +232,7 @@ void setup() {
     saved_password += char(digit);
   }
   pinMode(4, OUTPUT);
-  pinMode(red_led, OUTPUT);
-  pinMode(green_led, OUTPUT);
-  pinMode(yellow_led, OUTPUT);
-  pinMode(buzzer_pin, OUTPUT);
-  TCCR2A = TCCR2B = TIMSK2 = 0; // Timer2 belongs only to the passive buzzer.
-  digitalWrite(buzzer_pin, LOW);
+  setupIndicators();
   pinMode(adc_pin, INPUT);
   pinMode(current_pin, INPUT);
   setupBattery();
@@ -322,22 +256,13 @@ void loop() {
   uint32_t now = millis();
   State previous_motor_state = state;
   updateMotor(now);
-  // Observe the existing motor transitions solely to drive LEDs and the piezo.
-  if (state != previous_motor_state) {
-    if (motorMoving()) {
-      ui_blockage = true;
-      showFeedback(UI_ERROR);
-    } else {
-      if (!ui_blockage) showFeedback(state == LOCKED ? UI_NOTICE : UI_SUCCESS);
-      ui_blockage = false;
-    }
-  }
+  updateMotorFeedback(previous_motor_state, state);
   if (state == LOCKED || state == UNLOCKED || state == CHANGING_PASSWORD) {
     updateKeypad(now);
   }
-  updateBattery(millis());
   now = millis(); // Battery/EEPROM/Serial work may cross the idle-sleep deadline.
-  updateIndicators(now);
+  pauseBatteryWarning();
+  updateIndicators(now, state, isIdle(now));
   if (shouldSleep(now)) {
     digitalWrite(4, LOW);
     powerDown();
