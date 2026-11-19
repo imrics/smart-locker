@@ -22,7 +22,7 @@ void setBuzzer(uint16_t hz) {
   if (hz == 0) return;
 
   // CTC, toggle OC2B at TOP; f = 16 MHz / (2 * 32 * (OCR2A + 1)).
-  // Only 1000 Hz and 2000 Hz are used, giving TOP = 249 and 124.
+  // 1000, 1250 and 2000 Hz give TOP = 249, 199 and 124.
   TCNT2 = 0;
   OCR2A = OCR2B = F_CPU / (64UL * hz) - 1;
   TIFR2 = _BV(OCF2A) | _BV(OCF2B) | _BV(TOV2);
@@ -45,6 +45,12 @@ bool feedbackActive() {
   return feedback != UI_NONE;
 }
 
+bool cancelFeedback(Feedback type) {
+  if (feedback != type) return false;
+  feedback = UI_NONE;
+  return true;
+}
+
 // Milestone 4b: these helpers schedule indications without delay() or a library.
 void showFeedback(Feedback next) {
   feedback = next;
@@ -54,7 +60,7 @@ void showFeedback(Feedback next) {
 
 void updateIndicators(uint32_t now, State state, bool idle) {
   uint32_t elapsed = now - feedback_started;
-  uint16_t duration = feedback == UI_ERROR ? 400 :
+  uint16_t duration = feedback == UI_LOW_BATTERY ? 1000 : feedback == UI_ERROR ? 400 :
                       feedback == UI_SUCCESS ? 150 : 100;
   if (feedback != UI_NONE && elapsed >= duration) feedback = UI_NONE;
 
@@ -66,7 +72,9 @@ void updateIndicators(uint32_t now, State state, bool idle) {
                (state == LOCKING || state == UNLOCKING || state == CHANGING_PASSWORD));
   uint16_t hz = 0;
 
-  if (feedback == UI_SUCCESS) {
+  if (feedback == UI_LOW_BATTERY) {
+    hz = 1250; // One steady one-second tone: replace the battery.
+  } else if (feedback == UI_SUCCESS) {
     hz = 2000; // One 150 ms high tone: unlocked or password saved.
   } else if (feedback == UI_ERROR) {
     hz = 1000; // One 400 ms low tone: rejection, save error or blockage.

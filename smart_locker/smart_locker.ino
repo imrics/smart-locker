@@ -194,6 +194,7 @@ void updateKeypad(uint32_t now) {
   if (key != '\0') {
     if (shouldSleep(now)) {
       Serial.println(F("Awake"));
+      wakeBattery();
       digitalWrite(4, HIGH);
     }
     last_activity = now;
@@ -250,6 +251,7 @@ void setup() {
   setupIndicators();
   pinMode(adc_pin, INPUT);
   pinMode(current_pin, INPUT);
+  setupBattery();
   pinMode(9, OUTPUT);
   digitalWrite(4, HIGH);
   // clear Timer1 control registers
@@ -274,9 +276,10 @@ void loop() {
   if (state == LOCKED || state == UNLOCKED || state == CHANGING_PASSWORD) {
     updateKeypad(now);
   }
-  uint32_t indicator_now = millis(); // Use fresh time after EEPROM/Serial work.
-  updateIndicators(indicator_now, state, isIdle(indicator_now));
-  if (shouldSleep(indicator_now)) {
+  now = millis(); // Battery/EEPROM/Serial work may cross the idle-sleep deadline.
+  pauseBatteryWarning();
+  updateIndicators(now, state, isIdle(now));
+  if (shouldSleep(now)) {
     digitalWrite(4, LOW);
     powerDown();
   }
