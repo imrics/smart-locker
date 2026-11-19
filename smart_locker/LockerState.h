@@ -1,0 +1,8 @@
+#ifndef LOCKER_STATE_H
+#define LOCKER_STATE_H
+
+enum State {
+  LOCKING, UNLOCKING, LOCKED, UNLOCKED, CHANGING_PASSWORD
+};
+
+#endif
