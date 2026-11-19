@@ -1,4 +1,6 @@
 #include "EEPROM_lib.h"
+#include "hashbrown.h"
+#include "salt.h"
 #include "Indicators.h"
 
 const int adc_pin = A0;
@@ -8,7 +10,11 @@ const int lock_trip = 40;
 
 // state variables
 State state = LOCKING;
-String valid_password = "1234";
+//String valid_password = "03AC674216F3E15C761EE1A5E255F067953623C8B388B4459E13F978D7C846F4";
+//Hash of "1234 with assumption of a initial salt of 16 NULLs"
+//String valid_password = "26EC09ABDE52FB0D39C9E0649E7FD74940A13EBADB4956B5C43AF59176398479";
+//Hash seen by the stand atmega328p, why it differ is currently unknown
+String valid_password = "7424B80BD5B81DF2034C9F21A74FD22D82E4DBC286A2130E5B6959E0C87479FE";
 String entered_password = "";
 
 // keypad state variables
@@ -126,6 +132,8 @@ void updateMotor(uint32_t now) {
 }
 
 void handleKey(char key) {
+  String salt;
+
   if (state == CHANGING_PASSWORD) {
     if (key == '*') {
       entered_password = "";
@@ -134,12 +142,17 @@ void handleKey(char key) {
       Serial.println("Password change canceled");
     } else if (key == '#') {
       if (entered_password != "") {
-        if (EEPROM_update_array((uint8_t *)entered_password.c_str(),
-                                entered_password.length() + 1, 0) != EEPROM_SUCCESSFUL) {
+        salt = salt_generateSalt(); //Generated a salt for the password
+        for(int i = 0; i < SALT_SIZE; i++) { entered_password += salt[i]; } //For require, otherwise error will occur with '+='
+        String hashed_password = hashBrown(entered_password); //Hash the password
+        if (EEPROM_update_array((uint8_t *)hashed_password.c_str(),
+                                hashed_password.length() + 1, 0) != EEPROM_SUCCESSFUL) {
+          entered_password = "";
           Serial.println("Password save failed");
           showFeedback(UI_ERROR);
         } else {
-          valid_password = entered_password;
+          salt_storeSalt(salt); //If the new password is allocated, update the salt
+          valid_password = hashed_password;
           entered_password = "";
           state = UNLOCKED;
           showFeedback(UI_SUCCESS);
@@ -156,7 +169,9 @@ void handleKey(char key) {
     entered_password = "";
     if (state == UNLOCKED) startMove(LOCKING);
   } else if (state == LOCKED && key == '#') {
-    if (entered_password == valid_password) startMove(UNLOCKING);
+    salt = salt_fetchSalt();
+    for(int i = 0; i < SALT_SIZE; i++) { entered_password += salt[i]; }
+    if (hashBrown(entered_password) == valid_password) startMove(UNLOCKING);
     else {
       Serial.println("Incorrect password");
       showFeedback(UI_ERROR);
@@ -217,6 +232,7 @@ void setup() {
   Serial.begin(9600); 
 
   // read saved digits from EEPROM
+  /* NOTE: THIS WORKS UNDER THE ASSUMPTION THAT PASSWORD IS ALREADY THERE OR ALL EEPROM CELL ARE CLEAR (0 = '\0') */
   String saved_password = "";
   for (uint16_t address = 0; address <= EEPROM_SIZE; address++) {
     uint8_t digit;
@@ -227,7 +243,7 @@ void setup() {
       break;
     }
 
-    if (digit < '0' || digit > '9') break;
+    if (!isHexadecimalDigit(digit)) break;
     saved_password += char(digit);
   }
   pinMode(4, OUTPUT);
@@ -260,7 +276,7 @@ void loop() {
   }
   uint32_t indicator_now = millis(); // Use fresh time after EEPROM/Serial work.
   updateIndicators(indicator_now, state, isIdle(indicator_now));
-  if (shouldSleep(now)) {
+  if (shouldSleep(indicator_now)) {
     digitalWrite(4, LOW);
     powerDown();
   }
