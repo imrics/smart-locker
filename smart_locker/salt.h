@@ -12,7 +12,7 @@
 extern uint32_t salt_randomState;
 
 //Generate the seed
-String salt_generateSalt(uint32_t salt); //generateSalt
+String salt_generateSalt(); //generateSalt
   void salt_collectSaltSeed(); //collectSeed
   uint32_t salt_generateRandom(); //generateRandom
 
