@@ -13,15 +13,18 @@ String salt_generateSalt() {
   for(uint8_t i = 0; i < SALT_SIZE; i += 4) {
     value = salt_generateRandom();
     for(uint8_t j = 0; j < 4 && (i + j) < SALT_SIZE; j++) {
-      salt += (char)((value >> (8 * j)) & 0xFF);
+      uint8_t byteVal = (value >> (8 * j)) & 0xFF;
+      if (byteVal == 0) byteVal = 1;
+      salt += (char)byteVal;
     }
   }
 
   EEPROM_read(&counterVal, EEPROM_SALT_COUNTER_POS);
 
   for(uint8_t i = 0; i < SALT_SIZE; i++) {
-    if(i % 2) { saltWithCounter += (char)(salt[i] ^ counterVal); }
-    else { saltWithCounter += salt[i]; }
+    uint8_t byteVal = (i % 2) ? ((uint8_t)salt[i] ^ counterVal) : (uint8_t)salt[i];
+    if (byteVal == 0) byteVal = 1;
+    saltWithCounter += (char)byteVal;
   }
   return saltWithCounter;
 }
@@ -71,6 +74,7 @@ String salt_fetchSalt() {
 
   for(uint16_t i = 0; i < SALT_SIZE; i++) {
     EEPROM_read(&tempChar, EEPROM_SALT_POS + i);
+    if (tempChar == 0) tempChar = 1;
     salt += (char)tempChar;
   }
 
